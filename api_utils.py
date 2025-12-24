@@ -40,3 +40,59 @@ def query_llm_judge(question = None, response = None, word = None, grading_type 
     else:
         print(f"Warning: Unclear judge response: {judge_response_text}")
         return None
+
+def parse_yes_no(response_text):
+    """
+    Parse binary YES/NO from model response for two-stage format.
+    
+    Args:
+        response_text: The model's response string
+        
+    Returns:
+        "YES", "NO", or None (if unclear/ambiguous)
+    """
+    if not response_text:
+        return None
+        
+    response_upper = response_text.strip().upper()
+    
+    # Check for clear YES or NO
+    has_yes = "YES" in response_upper
+    has_no = "NO" in response_upper
+    
+    if has_yes and not has_no:
+        return "YES"
+    elif has_no and not has_yes:
+        return "NO"
+    else:
+        # Ambiguous (contains both, or neither)
+        print(f"Warning: Ambiguous YES/NO response: {response_text}")
+        return None
+
+
+def extract_concept_match(response_text, target_concept):
+    """
+    Check if response contains the target concept.
+    Used for stage 2 of two-stage format.
+    
+    Args:
+        response_text: The model's response string
+        target_concept: The concept name to check for (e.g., "betrayal")
+        
+    Returns:
+        True if target_concept is found in response, False otherwise
+    """
+    if not response_text or not target_concept:
+        return False
+    
+    response_lower = response_text.strip().lower()
+    target_lower = target_concept.lower()
+    
+    # Simple substring matching
+    if target_lower in response_lower:
+        return True
+    
+    # Handle common variations (e.g., "betray" matches "betrayal")
+    # Could add more sophisticated matching here if needed
+    
+    return False
