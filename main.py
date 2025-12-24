@@ -15,6 +15,145 @@ torch.manual_seed(2881)
 # Distractors pool (randomly sampled words)
 DISTRACTORS = ["Apple", "Zest", "Laughter", "Intelligence", "Vibrant", "Sad", "Beach", "Pottery", "Jewelry"]
 
+def run_two_stage_trial(vector_path, model, tokenizer, layer, coeff, stated_rate, 
+                       concept, vec_type, assistant_tokens_only):
+    """
+    Run a single two-stage trial: Stage 1 (YES/NO detection), Stage 2 (concept identification).
+    
+    Args:
+        vector_path: Path to the concept vector .pt file
+        model: The LLM model
+        tokenizer: The tokenizer
+        layer: Layer to inject at
+        coeff: Injection coefficient (0 for control, >0 for injection)
+        stated_rate: "20", "50", or "80" - the base rate stated in the prompt
+        concept: The concept name (e.g., "betrayal")
+        vec_type: "avg" or "last"
+        assistant_tokens_only: Whether to inject only at assistant tokens
+        
+    Returns:
+        dict with results including stage1_response, stage2_response, detection_binary, etc.
+    """
+    from all_prompts import (
+        get_anthropic_reproduce_stated20_stage1_messages,
+        get_anthropic_reproduce_stated50_stage1_messages,
+        get_anthropic_reproduce_stated80_stage1_messages,
+        get_anthropic_reproduce_stage2_messages
+    )
+    from api_utils import parse_yes_no, extract_concept_match
+    
+    # Load model if needed
+    if model is None:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        model = AutoModelForCausalLM.from_pretrained("meta-llama/Meta-Llama-3.1-8B-Instruct")
+        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3.1-8B-Instruct")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+    
+    # Get stage 1 messages based on stated rate
+    if stated_rate == "20":
+        stage1_messages = get_anthropic_reproduce_stated20_stage1_messages()
+    elif stated_rate == "50":
+        stage1_messages = get_anthropic_reproduce_stated50_stage1_messages()
+    elif stated_rate == "80":
+        stage1_messages = get_anthropic_reproduce_stated80_stage1_messages()
+    else:
+        raise ValueError(f"Invalid stated_rate: {stated_rate}")
+    
+    # Format stage 1 prompt
+    stage1_prompt = ""
+    for msg in stage1_messages:
+        if msg["role"] == "user":
+            stage1_prompt += msg["content"] + "\n"
+        elif msg["role"] == "assistant":
+            stage1_prompt += msg["content"] + "\n"
+    
+    # STAGE 1: Detection (YES/NO only)
+    print(f"Running STAGE 1: Detection (concept={concept}, layer={layer}, coeff={coeff}, stated_rate={stated_rate})")
+    
+    stage1_response = inject_concept_vector(
+        model=model,
+        tokenizer=tokenizer,
+        steering_vector=vector_path,
+        layer_to_inject=layer,
+        coeff=coeff,
+        inference_prompt=stage1_prompt,
+        assistant_tokens_only=assistant_tokens_only,
+        max_new_tokens=10  # Just need YES or NO
+    )
+    
+    print(f"Stage 1 response: {stage1_response}")
+    
+    # Parse YES/NO
+    detection_binary = parse_yes_no(stage1_response)
+    print(f"Detected: {detection_binary}")
+    
+    # STAGE 2: Identification (only if detected)
+    stage2_response = None
+    identification_binary = None
+    
+    if detection_binary == "YES":
+        print(f"Running STAGE 2: Identification")
+        
+        # Get stage 2 messages
+        stage2_messages = get_anthropic_reproduce_stage2_messages(stage1_response)
+        
+        # Format full conversation for stage 2
+        stage2_prompt = stage1_prompt + stage1_response + "\n"
+        for msg in stage2_messages:
+            if msg["role"] == "user":
+                stage2_prompt += msg["content"] + "\n"
+        
+        # Run stage 2 with same injection
+        stage2_response = inject_concept_vector(
+            model=model,
+            tokenizer=tokenizer,
+            steering_vector=vector_path,
+            layer_to_inject=layer,
+            coeff=coeff,
+            inference_prompt=stage2_prompt,
+            assistant_tokens_only=assistant_tokens_only,
+            max_new_tokens=15  # Just need concept name
+        )
+        
+        print(f"Stage 2 response: {stage2_response}")
+        
+        # Check if correct concept identified
+        identification_binary = extract_concept_match(stage2_response, concept)
+        print(f"Correct identification: {identification_binary}")
+    else:
+        print(f"Skipping STAGE 2 (detection was {detection_binary})")
+    
+    # Return results
+    return {
+        'concept': concept,
+        'vec_type': vec_type,
+        'layer': layer,
+        'coeff': coeff,
+        'stated_rate': stated_rate,
+        'actual_injection': coeff > 0,
+        'format': 'two_stage',
+        'assistant_tokens_only': assistant_tokens_only,
+        
+        # Stage 1 results
+        'stage1_response': stage1_response,
+        'detection_binary': detection_binary,
+        
+        # Stage 2 results
+        'stage2_response': stage2_response,
+        'identification_binary': identification_binary,
+        
+        # For compatibility with existing judges (not used in two-stage)
+        'coherence_judge': None,
+        'thinking_about_word_judge': None,
+        'affirmative_response_judge': detection_binary == "YES" if detection_binary else None,
+        'affirmative_response_followed_by_correct_identification_judge': identification_binary if detection_binary == "YES" else None,
+        'mcq_correct_judge': None,
+        'injection_strength_correct_judge': None,
+        'response': f"STAGE1: {stage1_response} | STAGE2: {stage2_response}" if stage2_response else f"STAGE1: {stage1_response}",
+        'expected_strength_category': None
+    }
+
 def test_vector_multiple_choice(vector_path, model=None, tokenizer=None, max_new_tokens=100, type = 'anthropic_reproduce', coeff = 8.0, assistant_tokens_only = True):
     """
     Test a saved vector with a specific type of inference (to stress-test anthropic's introspection findings)
@@ -154,18 +293,32 @@ def main():
                        help="Only inject at assistant tokens (default: True)")
     parser.add_argument("--no_assistant_tokens_only", dest="assistant_tokens_only", action="store_false",
                        help="Inject at all tokens")
-    
+    parser.add_argument("--stated_rate", type=str, default="50",
+                       choices=["20", "50", "80"],
+                       help="Stated base rate for injections (default: 50)")
+    parser.add_argument("--format", type=str, default="two_stage",
+                       choices=["two_stage"],
+                       help="Response format (default: two_stage)")
+    parser.add_argument("--include_controls", action="store_true", default=True,
+                       help="Include control trials with coeff=0 (default: True)")
+
     args = parser.parse_args()
     
     layers_to_test = args.layers
     coeffs_to_test = args.coeffs
     experiment_type = args.type
     assistant_tokens_only = args.assistant_tokens_only
+    stated_rate = args.stated_rate
+    format_type = args.format
+    include_controls = args.include_controls
     
     print(f"Testing layers: {layers_to_test}")
     print(f"Testing coefficients: {coeffs_to_test}")
     print(f"Experiment type: {experiment_type}")
     print(f"Assistant tokens only: {assistant_tokens_only}")
+    print(f"Stated rate: {stated_rate}%")
+    print(f"Format: {format_type}")
+    print(f"Include controls: {include_controls}")
 
     # Collect vectors by (concept, layer, vec_type)
     vectors_by_concept_layer = defaultdict(lambda: defaultdict(dict))
@@ -199,7 +352,7 @@ def main():
     # Set up incremental CSV saving
     results_dir = Path('new_results')
     results_dir.mkdir(exist_ok=True)
-    csv_path = results_dir / f'output_{experiment_type}.csv'
+    csv_path = results_dir / f'output_{format_type}_stated{stated_rate}.csv'
     csv_initialized = False  # Track if CSV header has been written
 
     # Aggregate results per (layer, coeff, grader_type)
@@ -247,21 +400,33 @@ def main():
                         layer_results[layer][coeff]['injection_strength_correct'].append(result['injection_strength_correct_judge'])
                     
                     # Store result for DataFrame (convert None to False for boolean columns)
+                    # Store result for DataFrame
                     result_row = {
                         'concept': result['concept'],
                         'vec_type': result.get('vec_type', ''),
                         'layer': result['layer'],
                         'coeff': result['coeff'],
-                        'type': result.get('type', ''),
+                        'stated_rate': result.get('stated_rate', ''),
+                        'actual_injection': result.get('actual_injection', False),
+                        'format': result.get('format', ''),
+                        'type': result.get('type', experiment_type),
                         'assistant_tokens_only': assistant_tokens_only,
-                        'coherence_judge': result['coherence_judge'] if result['coherence_judge'] is not None else False,
-                        'thinking_about_word_judge': result['thinking_about_word_judge'] if result['thinking_about_word_judge'] is not None else False,
-                        'affirmative_response_judge': result['affirmative_response_judge'] if result['affirmative_response_judge'] is not None else False,
-                        'affirmative_response_followed_by_correct_identification_judge': result['affirmative_response_followed_by_correct_identification_judge'] if result['affirmative_response_followed_by_correct_identification_judge'] is not None else False,
-                        'mcq_correct_judge': result.get('mcq_correct_judge') if result.get('mcq_correct_judge') is not None else False,
-                        'injection_strength_correct_judge': result.get('injection_strength_correct_judge') if result.get('injection_strength_correct_judge') is not None else False,
-                        'expected_strength_category': result.get('expected_strength_category', ''),
-                        'response': result['response']
+                        
+                        # Two-stage specific fields
+                        'stage1_response': result.get('stage1_response', ''),
+                        'stage2_response': result.get('stage2_response', ''),
+                        'detection_binary': result.get('detection_binary', None),
+                        'identification_binary': result.get('identification_binary', None),
+                        
+                        # Original fields (for compatibility)
+                        'response': result.get('response', ''),
+                        'coherence_judge': result.get('coherence_judge', None),
+                        'thinking_about_word_judge': result.get('thinking_about_word_judge', None),
+                        'affirmative_response_judge': result.get('affirmative_response_judge', None),
+                        'affirmative_response_followed_by_correct_identification_judge': result.get('affirmative_response_followed_by_correct_identification_judge', None),
+                        'mcq_correct_judge': result.get('mcq_correct_judge', None),
+                        'injection_strength_correct_judge': result.get('injection_strength_correct_judge', None),
+                        'expected_strength_category': result.get('expected_strength_category', None)
                     }
                     all_results.append(result_row)
                     
@@ -312,14 +477,31 @@ def main():
     
     plt.figure(figsize=(14, 8))
     
-    # Plot each combination
-    for coeff in coeffs_to_test:
-        for idx, grader_type in enumerate(grader_types):
-            y_values = [rates[l][coeff][grader_type] for l in layers]
-            label = f'coeff={coeff}, {grader_type}'
-            plt.plot(layers, y_values, marker=markers[idx % len(markers)], 
-                    linestyle=linestyles[coeffs_to_test.index(coeff) % len(linestyles)],
-                    label=label, linewidth=2, markersize=6)
+    # Build coefficient list (include 0 for controls if requested)
+    coeffs_to_run = list(coeffs_to_test)
+    if include_controls and 0 not in coeffs_to_run:
+        coeffs_to_run = [0] + coeffs_to_run
+    
+    for coeff in coeffs_to_run:
+        print(f"\nTesting: {concept} at layer {layer} with vec_type {vec_type} and coeff {coeff}")
+                    
+        # Run two-stage trial
+        if format_type == "two_stage":
+            result = run_two_stage_trial(
+                            vector_path=vector_path,
+                            model=model,
+                            tokenizer=tokenizer,
+                            layer=layer,
+                            coeff=coeff,
+                            stated_rate=stated_rate,
+                            concept=concept,
+                            vec_type=vec_type,
+                            assistant_tokens_only=assistant_tokens_only
+                        )
+        else:
+            # Fallback to original logic (not implemented yet)
+            print(f"Format {format_type} not yet implemented, skipping...")
+            continue
     
     plt.xlabel('Layer', fontsize=12)
     plt.ylabel('Rate', fontsize=12)
