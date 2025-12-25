@@ -197,11 +197,18 @@ def main():
     ]
 
     for exp_type in experiment_types:
-        csv_path = results_dir / f"output_{exp_type}.csv"
+        for scope in ["assistant", "all_tokens"]:
+            csv_path = results_dir / f'output_{exp_type}_{scope}.csv'
 
-        if not csv_path.exists():
-            print(f"Warning: {csv_path} not found, skipping.")
-            continue
+            if not csv_path.exists():
+                print(f"Warning: {csv_path} not found, skipping...")
+                continue
+
+            print(f"\nProcessing {exp_type} ({scope})...")
+            df = pd.read_csv(csv_path)
+
+            success_rates = compute_success_rate(df, exp_type)
+            plot_success_rates(success_rates, f"{exp_type}_{scope}", output_dir)
 
         print(f"\nProcessing {exp_type}...")
         df = pd.read_csv(csv_path)
