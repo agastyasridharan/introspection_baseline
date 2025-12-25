@@ -275,21 +275,6 @@ def main():
                         # Append without header
                         result_df.to_csv(csv_path, index=False, mode='a', header=False)
 
-    # Save final results as DataFrame (CSV already saved incrementally, but save full version for Parquet)
-    results_df = pd.DataFrame(all_results)
-    
-    # CSV already saved incrementally, but save full version to ensure consistency
-    results_df.to_csv(csv_path, index=False)
-    print(f"\nFinal results saved to {csv_path}")
-    
-    # Save as Parquet (more efficient, preserves types, better for large datasets)
-    try:
-        parquet_path = results_dir / f'output_{experiment_type}.parquet'
-        results_df.to_parquet(parquet_path, index=False)
-        print(f"Results saved to {parquet_path}")
-    except ImportError:
-        print("Note: pyarrow not installed, skipping Parquet export. Install with: pip install pyarrow")
-
     # Compute rates per (layer, coeff, grader_type)
     # Structure: rates[layer][coeff][grader_type] = rate
     rates = defaultdict(lambda: defaultdict(dict))
