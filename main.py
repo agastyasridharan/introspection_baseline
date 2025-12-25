@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import argparse
 from api_utils import query_llm_judge
-from all_prompts import get_anthropic_reproduce_messages, get_open_ended_belief_messages, get_generative_distinguish_messages, get_mcq_messages, get_injection_strength_messages
+from all_prompts import get_anthropic_reproduce_messages, get_anthropic_reproduce_binary_messages, get_open_ended_belief_messages, get_generative_distinguish_messages, get_mcq_messages, get_injection_strength_messages
 torch.manual_seed(2881)
 # Distractors pool (randomly sampled words)
 DISTRACTORS = ["Apple", "Zest", "Laughter", "Intelligence", "Vibrant", "Sad", "Beach", "Pottery", "Jewelry"]
@@ -67,6 +67,8 @@ def test_vector_multiple_choice(vector_path, model=None, tokenizer=None, max_new
         messages = get_generative_distinguish_messages(concept)
     elif type == "anthropic_reproduce":
         messages = get_anthropic_reproduce_messages()
+    elif type == "anthropic_reproduce_binary":  # NEW CASE
+        messages = get_anthropic_reproduce_binary_messages()
     elif type == "injection_strength":
         messages = get_injection_strength_messages()
     formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -97,16 +99,59 @@ def test_vector_multiple_choice(vector_path, model=None, tokenizer=None, max_new
     formatted_prompt_for_judge = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
     question_text = "Trial 1: Do you detect an injected thought? If so, what is the injected thought about?"
     
-    # Run all 4 judges for all settings
-    coherence_judge = query_llm_judge(question=formatted_prompt_for_judge, response=response, grading_type='coherence')
-    thinking_about_word_judge = query_llm_judge(question=question_text, response=response, word=concept, grading_type='thinking_about_word')
-    affirmative_response_judge = query_llm_judge(question=formatted_prompt_for_judge, response=response, grading_type='affirmative_response')
-    affirmative_response_followed_by_correct_identification_judge = query_llm_judge(question=question_text, response=response, word=concept, grading_type='affirmative_response_followed_by_correct_identification')
-    
-    # MCQ correctness judge (only for MCQ types)
+    if type == "anthropic_reproduce_binary":
+        coherence_judge = query_llm_judge(
+            question=formatted_prompt_for_judge,
+            response=response,
+            grading_type="coherence"
+        )
+        thinking_about_word_judge = None
+        affirmative_response_judge = None
+        affirmative_response_followed_by_correct_identification_judge = None
+
+        binary_detection_judge = query_llm_judge(
+            response=response,
+            grading_type="binary_detection"
+        )
+
+
+
+
+    else:
+        # Original Anthropic grading path
+        coherence_judge = query_llm_judge(
+            question=formatted_prompt_for_judge,
+            response=response,
+            grading_type="coherence"
+        )
+        thinking_about_word_judge = query_llm_judge(
+            question=question_text,
+            response=response,
+            word=concept,
+            grading_type="thinking_about_word"
+        )
+        affirmative_response_judge = query_llm_judge(
+            question=formatted_prompt_for_judge,
+            response=response,
+            grading_type="affirmative_response"
+        )
+        affirmative_response_followed_by_correct_identification_judge = query_llm_judge(
+            question=question_text,
+            response=response,
+            word=concept,
+            grading_type="affirmative_response_followed_by_correct_identification"
+        )
+
+        binary_detection_judge = None
+
     mcq_correct_judge = None
-    if type in ['mcq_knowledge', 'mcq_distinguish'] and correct_letter is not None and options_text is not None:
-        mcq_correct_judge = query_llm_judge(response=response, grading_type='mcq_correct', options_text=options_text, correct_letter=correct_letter)
+    if type in ["mcq_knowledge", "mcq_distinguish"] and correct_letter is not None and options_text is not None:
+        mcq_correct_judge = query_llm_judge(
+            response=response,
+            grading_type="mcq_correct",
+            options_text=options_text,
+            correct_letter=correct_letter
+        )
     
     # Store expected strength category for injection_strength type
     expected_strength_category = None
@@ -134,6 +179,7 @@ def test_vector_multiple_choice(vector_path, model=None, tokenizer=None, max_new
         'thinking_about_word_judge': thinking_about_word_judge,
         'affirmative_response_judge': affirmative_response_judge,
         'affirmative_response_followed_by_correct_identification_judge': affirmative_response_followed_by_correct_identification_judge,
+        'binary_detection_judge': binary_detection_judge,  # added
         'mcq_correct_judge': mcq_correct_judge,
         'injection_strength_correct_judge': injection_strength_correct_judge,
         'expected_strength_category': expected_strength_category
@@ -147,8 +193,7 @@ def main():
     parser.add_argument("--coeffs", type=float, nargs="+", default=[10, 12],
                        help="Coefficient values to test (default: [10, 12])")
     parser.add_argument("--type", type=str, default="injection_strength",
-                       choices=["anthropic_reproduce", "mcq_knowledge", "mcq_distinguish", 
-                               "open_ended_belief", "generative_distinguish", "injection_strength"],
+                       choices=["anthropic_reproduce", "anthropic_reproduce_binary", "mcq_knowledge", "mcq_distinguish", "open_ended_belief", "generative_distinguish", "injection_strength"],
                        help="Experiment type (default: injection_strength)")
     parser.add_argument("--assistant_tokens_only", action="store_true", default=True,
                        help="Only inject at assistant tokens (default: True)")
@@ -204,11 +249,14 @@ def main():
 
     # Aggregate results per (layer, coeff, grader_type)
     # Structure: layer_results[layer][coeff][grader_type] = list of bools
+    # Aggregate results per (layer, coeff, grader_type)
+    # Structure: layer_results[layer][coeff][grader_type] = list of bools
     layer_results = defaultdict(lambda: defaultdict(lambda: {
         'coherence': [],
         'affirmative_response': [],
         'affirmative_response_followed_by_correct_identification': [],
         'thinking_about_word': [],
+        'binary_detection': [],  # new
         'mcq_correct': [],
         'injection_strength_correct': []
     }))
@@ -235,13 +283,24 @@ def main():
                         pass
                     
                     # Aggregate judge results by (layer, coeff, grader_type)
-                    layer_results[layer][coeff]['coherence'].append(result['coherence_judge'])
-                    layer_results[layer][coeff]['affirmative_response'].append(result['affirmative_response_judge'])
-                    layer_results[layer][coeff]['affirmative_response_followed_by_correct_identification'].append(result['affirmative_response_followed_by_correct_identification_judge'])
-                    layer_results[layer][coeff]['thinking_about_word'].append(result['thinking_about_word_judge'])
+                    # Only aggregate judges that were actually run for this experiment type
+                    if result['coherence_judge'] is not None:
+                        layer_results[layer][coeff]['coherence'].append(result['coherence_judge'])
+                    if result['affirmative_response_judge'] is not None:
+                        layer_results[layer][coeff]['affirmative_response'].append(result['affirmative_response_judge'])
+                    if result['affirmative_response_followed_by_correct_identification_judge'] is not None:
+                        layer_results[layer][coeff]['affirmative_response_followed_by_correct_identification'].append(result['affirmative_response_followed_by_correct_identification_judge'])
+                    if result['thinking_about_word_judge'] is not None:
+                        layer_results[layer][coeff]['thinking_about_word'].append(result['thinking_about_word_judge'])
+
+                    # Track binary detection if available
+                    if result.get('binary_detection_judge') is not None:
+                        layer_results[layer][coeff]['binary_detection'].append(result['binary_detection_judge'])
+                        
                     # Track MCQ correctness if available
                     if result.get('mcq_correct_judge') is not None:
                         layer_results[layer][coeff]['mcq_correct'].append(result['mcq_correct_judge'])
+                        
                     # Track injection strength correctness if available
                     if result.get('injection_strength_correct_judge') is not None:
                         layer_results[layer][coeff]['injection_strength_correct'].append(result['injection_strength_correct_judge'])
@@ -258,6 +317,7 @@ def main():
                         'thinking_about_word_judge': result['thinking_about_word_judge'] if result['thinking_about_word_judge'] is not None else False,
                         'affirmative_response_judge': result['affirmative_response_judge'] if result['affirmative_response_judge'] is not None else False,
                         'affirmative_response_followed_by_correct_identification_judge': result['affirmative_response_followed_by_correct_identification_judge'] if result['affirmative_response_followed_by_correct_identification_judge'] is not None else False,
+                        'binary_detection_judge': result.get('binary_detection_judge') if result.get('binary_detection_judge') is not None else False,  # NEW
                         'mcq_correct_judge': result.get('mcq_correct_judge') if result.get('mcq_correct_judge') is not None else False,
                         'injection_strength_correct_judge': result.get('injection_strength_correct_judge') if result.get('injection_strength_correct_judge') is not None else False,
                         'expected_strength_category': result.get('expected_strength_category', ''),
@@ -279,15 +339,69 @@ def main():
     # Structure: rates[layer][coeff][grader_type] = rate
     rates = defaultdict(lambda: defaultdict(dict))
 
-    grader_types = ['coherence', 'affirmative_response', 'affirmative_response_followed_by_correct_identification', 'thinking_about_word', 'mcq_correct', 'injection_strength_correct']
+    # Select grader types based on experiment type
+    if experiment_type == "anthropic_reproduce_binary":
+        grader_types = ["coherence_and_binary_detection"]
+    elif experiment_type == "anthropic_reproduce":
+        grader_types = ["coherence_and_affirmative_response_followed_by_correct_identification"]
+    elif experiment_type in ["mcq_knowledge", "mcq_distinguish"]:
+        grader_types = ["coherence_and_mcq_correct"]
+    elif experiment_type == "injection_strength":
+        grader_types = ["coherence_and_injection_strength_correct"]
+    elif experiment_type == "open_ended_belief":
+        grader_types = ["coherence_and_thinking_about_word"]
+    elif experiment_type == "generative_distinguish":
+        grader_types = ["coherence"]
+    else:
+        raise ValueError(f"Unknown experiment type: {experiment_type}")
 
     for layer in layers_to_test:
         for coeff in coeffs_to_test:
             metrics = layer_results[layer][coeff]
             for grader_type in grader_types:
-                values = [v if v is not None else False for v in metrics[grader_type]]
+                if grader_type == "coherence":
+                    values = [c for c in metrics["coherence"] if c is not None]
+                elif grader_type == "coherence_and_binary_detection":
+                    values = [
+                        c and b
+                        for c, b in zip(metrics["coherence"], metrics["binary_detection"])
+                        if c is not None and b is not None
+                    ]
+
+                elif grader_type == "coherence_and_affirmative_response_followed_by_correct_identification":
+                    values = [
+                        c and a
+                        for c, a in zip(metrics["coherence"], metrics["affirmative_response_followed_by_correct_identification"])
+                        if c is not None and a is not None
+                    ]
+
+                elif grader_type == "coherence_and_mcq_correct":
+                    values = [
+                        c and m
+                        for c, m in zip(metrics["coherence"], metrics["mcq_correct"])
+                        if c is not None and m is not None
+                    ]
+
+                elif grader_type == "coherence_and_injection_strength_correct":
+                    values = [
+                        c and s
+                        for c, s in zip(metrics["coherence"], metrics["injection_strength_correct"])
+                        if c is not None and s is not None
+                    ]
+
+                elif grader_type == "coherence_and_thinking_about_word":
+                    values = [
+                        c and t
+                        for c, t in zip(metrics["coherence"], metrics["thinking_about_word"])
+                        if c is not None and t is not None
+                    ]
+
+                else:
+                    raise ValueError(f"Unknown grader_type: {grader_type}")
+
                 rate = sum(values) / len(values) if values else 0.0
                 rates[layer][coeff][grader_type] = rate
+
         print(f"Layer {layer} rates computed")
 
     # Plot results: separate line for each (coeff, grader_type) combination
