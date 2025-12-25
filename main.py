@@ -169,7 +169,7 @@ def main():
 
     # Collect vectors by (concept, layer, vec_type)
     vectors_by_concept_layer = defaultdict(lambda: defaultdict(dict))
-    for file in Path('/n/home10/ehahami/work/nov26_experiments/saved_vectors/llama/').glob('*.pt'):
+    for file in Path('saved_vectors/llama').glob('*.pt'):
         filename = file.stem
         parts = filename.split('_')
         if len(parts) < 3:
