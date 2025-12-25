@@ -324,15 +324,12 @@ def main():
                     }
                     all_results.append(result_row)
                     
-                    # Save incrementally to CSV
-                    result_df = pd.DataFrame([result_row])
-                    if not csv_initialized:
-                        # Write with header (first time)
-                        result_df.to_csv(csv_path, index=False, mode='w')
-                        csv_initialized = True
-                    else:
-                        # Append without header
-                        result_df.to_csv(csv_path, index=False, mode='a', header=False)
+                    pd.DataFrame([result_row]).to_csv(
+                        csv_path,
+                        mode='a',
+                        header=not csv_path.exists(),
+                        index=False
+                    )
 
     # Compute rates per (layer, coeff, grader_type)
     # Structure: rates[layer][coeff][grader_type] = rate
