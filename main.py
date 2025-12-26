@@ -201,25 +201,6 @@ def main():
     results_dir.mkdir(exist_ok=True)
     csv_path = results_dir / f'output_{experiment_type}.csv'
 
-    # --- CRITICAL FIX: always initialize CSV with header ---
-    pd.DataFrame(columns=[
-    'concept',
-    'vec_type',
-    'layer',
-    'coeff',
-    'type',
-    'assistant_tokens_only',
-    'coherence_judge',
-    'thinking_about_word_judge',
-    'affirmative_response_judge',
-    'affirmative_response_followed_by_correct_identification_judge',
-    'mcq_correct_judge',
-    'injection_strength_correct_judge',
-    'expected_strength_category',
-    'response'
-    ]).to_csv(csv_path, index=False)
-
-
     # Aggregate results per (layer, coeff, grader_type)
     # Structure: layer_results[layer][coeff][grader_type] = list of bools
     layer_results = defaultdict(lambda: defaultdict(lambda: {
@@ -283,15 +264,14 @@ def main():
                     }
                     all_results.append(result_row)
                     
-                    # Save incrementally to CSV
+                    # Save incrementally to CSV with robust header handling
                     result_df = pd.DataFrame([result_row])
-                    if not csv_initialized:
-                        # Write with header (first time)
-                        result_df.to_csv(csv_path, index=False, mode='w')
-                        csv_initialized = True
-                    else:
-                        # Append without header
-                        result_df.to_csv(csv_path, index=False, mode='a', header=False)
+                    result_df.to_csv(
+                        csv_path,
+                        mode='a',
+                        header=not csv_path.exists(),
+                        index=False
+                    )
 
     # Save final results as DataFrame (CSV already saved incrementally, but save full version for Parquet)
     results_df = pd.DataFrame(all_results)
@@ -357,4 +337,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
