@@ -264,12 +264,16 @@ def main():
                     }
                     all_results.append(result_row)
                     
-                    # Save incrementally to CSV with robust header handling
+                    # Save incrementally to CSV - check file SIZE not just existence
                     result_df = pd.DataFrame([result_row])
+                    
+                    # Determine if we need header: file doesn't exist OR is empty (≤1 byte)
+                    write_header = not csv_path.exists() or csv_path.stat().st_size <= 1
+                    
                     result_df.to_csv(
                         csv_path,
                         mode='a',
-                        header=not csv_path.exists(),
+                        header=write_header,
                         index=False
                     )
 
